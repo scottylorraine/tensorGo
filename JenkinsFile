@@ -1,0 +1,168 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = 'my-python-app' 
+        DOCKER_TAG = 'latest' 
+        DOCKER_CONTAINER_NAME = 'tensorGo-python-application'
+        TRIVY_VERSION = '0.22.0' // Version of Trivy to use
+        TRIVY_PATH = '/usr/bin/trivy' 
+        
+        MONGO_IMAGE = 'mongo'
+        MONGO_CONTAINER_NAME = 'new-mongodb-container'
+        MONGO_PORT = '27017'
+        MONGO_DATA_VOLUME = 'new_mongo_data'
+        MONGO_ROOT_USERNAME = 'admin'
+      
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/scottylorraine/tensorGo.git'
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                  
+                    sh 'docker --version'
+                    
+                 
+                    sh "docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} ."
+                }
+            }
+        } 
+        
+        stage('Trivy File Scan') {
+            steps {
+                script {
+          
+                    sh """
+                    ${TRIVY_PATH} fs . > trivyfs.txt || true
+                    """
+                }
+            }
+        }
+        
+        stage('Trivy Docker Image Scan') {
+            steps {
+                script {
+
+                    sh """
+                    ${TRIVY_PATH} image --no-progress ${DOCKER_IMAGE}:${DOCKER_TAG} > trivy-image-report.txt
+                    """
+                }
+            }
+        }
+        
+ 
+
+        stage('Ensure Docker Volume Exists') {
+            steps {
+                script {
+        
+                    sh """
+                    if ! docker volume ls --format '{{.Name}}' | grep -q ${MONGO_DATA_VOLUME}; then
+                        docker volume create ${MONGO_DATA_VOLUME}
+                    fi
+                    """
+                }
+            }
+        }
+        
+        stage('Stop and Remove Existing MongoDB Container') {
+            steps {
+                script {
+   
+                    sh """
+                    if docker ps -a --format '{{.Names}}' | grep -q ${MONGO_CONTAINER_NAME}; then
+                        docker stop ${MONGO_CONTAINER_NAME} || true
+                        docker rm ${MONGO_CONTAINER_NAME} || true
+                    fi
+                    """
+                }
+            }
+        }
+        
+        stage('Run MongoDB Container') {
+            steps {
+                script {
+                     withCredentials([string(credentialsId: 'f1818b97-5568-41aa-b28b-9db24a162c21', variable: 'MONGO_ROOT_PASSWORD')]) {
+       
+                    sh """
+                    docker run -d \
+                      --name ${MONGO_CONTAINER_NAME} \
+                      -p ${MONGO_PORT}:${MONGO_PORT} \
+                      -v ${MONGO_DATA_VOLUME}:/data/db \
+                      -e MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME} \
+                      -e MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD} \
+                      ${MONGO_IMAGE}
+                    """
+                }
+                }
+            }
+        }
+        
+        stage('Verify MongoDB Deployment') {
+            steps {
+                script {
+                    def containerStatus = sh(script: "docker ps | grep ${MONGO_CONTAINER_NAME}", returnStatus: true)
+                    if (containerStatus == 0) {
+                        echo "MongoDB container '${MONGO_CONTAINER_NAME}' is running."
+                    } else {
+                        error "MongoDB container '${MONGO_CONTAINER_NAME}' is not running!"
+                    }
+                }
+            }
+        }
+stage('Push Docker Image') {
+    steps {
+        script {
+            withCredentials([usernamePassword(credentialsId: 'a16fcc95-0721-480f-83de-02bafc3055e3', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+          
+                sh '''
+                echo ${DOCKER_PASSWORD} | docker login -u ${DOCKER_USERNAME} --password-stdin
+                '''
+                
+            
+                sh '''
+                docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} scottylorraine/tensor:${DOCKER_TAG}
+                '''
+                
+  
+                sh '''
+                docker push scottylorraine/tensor:${DOCKER_TAG}
+                '''
+            }
+        }
+    }
+}
+
+stage('Run Docker Container') {
+    steps {
+        script {
+
+            sh """
+                if docker ps --format '{{.Names}}' | grep -q ${DOCKER_CONTAINER_NAME}; then
+                    docker stop ${DOCKER_CONTAINER_NAME}
+                fi
+            """
+
+            sh """
+                if docker ps -a --format '{{.Names}}' | grep -q ${DOCKER_CONTAINER_NAME}; then
+                    docker rm ${DOCKER_CONTAINER_NAME}
+                fi
+            """
+
+    
+            sh """
+                docker run --env-file .env -itd -p 5000:5000 --name ${DOCKER_CONTAINER_NAME} ${DOCKER_IMAGE}:${DOCKER_TAG}
+            """
+        }
+    }
+}
+    
+    }
+}
